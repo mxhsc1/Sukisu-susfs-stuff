@@ -1,0 +1,10 @@
+# 自定义提交配置
+custom=true
+
+gki-android12-5.10=
+gki-android13-5.15=
+gki-android14-6.1=ee155a1
+gki-android15-6.6=
+gki-android16-6.12=
+
+sukisu=b16e899
