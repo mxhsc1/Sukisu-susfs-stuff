@@ -587,4 +587,347 @@ jobs:
           fi
 
           # Hook 类型
-          if [ "${{ inputs.kernelsu_variant }}
+          if [ "${{ inputs.kernelsu_variant }}" = "SukiSU" ] || [ "${{ inputs.kernelsu_variant }}" = "BakaSU" ]; then
+            echo "HOOK_TYPE=SUSFS Inline Hooks" >> $GITHUB_ENV
+          else
+            echo "HOOK_TYPE=KPROBE Hooks" >> $GITHUB_ENV
+          fi
+
+          # Mount 类型
+          if [ "${{ inputs.kernelsu_variant }}" = "Official" ]; then
+            echo "MOUNT_TYPE=OVERLAYFS" >> $GITHUB_ENV
+          else
+            echo "MOUNT_TYPE=Magic Mount" >> $GITHUB_ENV
+          fi
+
+          # 发布标题与 KernelSU / SUSFS 模式（GITHUB_ENV 中后写入的同名变量会覆盖前面的值）
+          case "${{ inputs.ksu_mode }}" in
+            "禁用KSU")
+              echo "KSU_NAME=未集成" >> $GITHUB_ENV
+              echo "KSU_VER=" >> $GITHUB_ENV
+              echo "SUS_VER=未集成" >> $GITHUB_ENV
+              echo "BRANCH_INFO=-" >> $GITHUB_ENV
+              echo "HOOK_TYPE=无" >> $GITHUB_ENV
+              echo "MOUNT_TYPE=无" >> $GITHUB_ENV
+              echo "KPM_STATUS=未开启" >> $GITHUB_ENV
+              echo "RELEASE_HEADLINE=**纯净 GKI 内核**（未集成 KernelSU / SUSFS）" >> $GITHUB_ENV
+              echo "RELEASE_NAME=GKI Kernel: 纯净版（无 KernelSU / SUSFS）" >> $GITHUB_ENV
+              ;;
+            "禁用SUSFS")
+              echo "SUS_VER=未集成" >> $GITHUB_ENV
+              echo "RELEASE_HEADLINE=**${KSU_NAME} ${KSU_VER}**（未集成 SUSFS）" >> $GITHUB_ENV
+              echo "RELEASE_NAME=GKI Kernel: ${KSU_NAME} ${KSU_VER}（无 SUSFS）" >> $GITHUB_ENV
+              ;;
+            *)
+              echo "RELEASE_HEADLINE=**${KSU_NAME} ${KSU_VER}** + **SUSFS ${SUS_VER}**" >> $GITHUB_ENV
+              echo "RELEASE_NAME=GKI Kernel: ${KSU_NAME} ${KSU_VER} + SUSFS ${SUS_VER}" >> $GITHUB_ENV
+              ;;
+          esac
+
+      - name: 验证构建状态
+        run: |
+          failed=0
+          check_build() {
+            local selected="$1" job_name="$2" result="$3"
+            if [[ "$selected" == "true" && "$result" != "success" && "$result" != "skipped" ]]; then
+              echo "选中的构建任务 $job_name 失败 (结果: $result)"
+              failed=1
+            fi
+          }
+          check_build "${{ inputs.build_a12_5_10 || inputs.build_all }}" "build-a12-5-10" "${{ needs.build-a12-5-10.result }}"
+          check_build "${{ inputs.build_a13_5_15 || inputs.build_all }}" "build-a13-5-15" "${{ needs.build-a13-5-15.result }}"
+          check_build "${{ inputs.build_a14_6_1 || inputs.build_all }}" "build-a14-6-1" "${{ needs.build-a14-6-1.result }}"
+          check_build "${{ inputs.build_a15_6_6 || inputs.build_all }}" "build-a15-6-6" "${{ needs.build-a15-6-6.result }}"
+          check_build "${{ inputs.build_a16_6_12 || inputs.build_all }}" "build-a16-6-12" "${{ needs.build-a16-6-12.result }}"
+          [[ "$failed" -ne 0 ]] && exit 1 || true
+
+      - name: 检出代码
+        uses: actions/checkout@v7
+        with:
+          ref: ${{ github.sha }}
+
+      - name: 确定 KSU 引用
+        if: inputs.ksu_mode != '禁用KSU'
+        run: |
+          case "${{ inputs.kernelsu_variant }}" in
+            "Official") BRANCH="main" ;;
+            "SukiSU")
+              if [ "${{ inputs.ksu_mode }}" != "关闭" ]; then
+                BRANCH="main"
+              else
+                BRANCH="builtin"
+              fi
+              ;;
+            "BakaSU") BRANCH="main" ;;
+            "Next") BRANCH="dev" ;;
+            *) echo "错误: 未知变体" >&2; exit 1 ;;
+          esac
+          echo "KSU_BRANCH=$BRANCH" >> $GITHUB_ENV
+          echo "BRANCH_INFO=$BRANCH" >> $GITHUB_ENV
+
+      - name: 获取 KernelSU 提交信息
+        if: inputs.ksu_mode != '禁用KSU'
+        run: |
+          case "${{ inputs.kernelsu_variant }}" in
+            "Official") REPO_URL="https://github.com/tiann/KernelSU.git"; REPO_URL2="tiann/KernelSU" ;;
+            "Next") REPO_URL="https://github.com/KernelSU-Next/KernelSU-Next.git"; REPO_URL2="KernelSU-Next/KernelSU-Next" ;;
+            "SukiSU") REPO_URL="https://github.com/SukiSU-Ultra/SukiSU-Ultra.git"; REPO_URL2="SukiSU-Ultra/SukiSU-Ultra" ;;
+            "BakaSU") REPO_URL="https://github.com/Baka-SU/BakaSU.git"; REPO_URL2="Baka-SU/BakaSU" ;;
+          esac
+
+          if [ "${{ inputs.kernelsu_variant }}" = "SukiSU" ] && [ -f "config/config" ]; then
+            CUSTOM_ENABLED=$(grep "^custom=" config/config | cut -d'=' -f2)
+            CUSTOM_COMMIT=$(grep "^sukisu=" config/config | cut -d'=' -f2)
+            if [ "$CUSTOM_ENABLED" = "true" ] && [ -n "$CUSTOM_COMMIT" ]; then
+              KSU_REF="$CUSTOM_COMMIT"
+              KSU_URL="https://github.com/$REPO_URL2/commit/$CUSTOM_COMMIT"
+              echo "BRANCH_INFO=custom" >> $GITHUB_ENV
+            fi
+          fi
+
+          if [ -z "${KSU_REF:-}" ]; then
+            COMMIT_HASH=$(git ls-remote $REPO_URL refs/heads/${KSU_BRANCH:-main} | awk '{ print $1 }')
+            KSU_REF=$COMMIT_HASH
+            KSU_URL="https://github.com/$REPO_URL2/commit/$COMMIT_HASH"
+          fi
+
+          echo "KSU_REF=$KSU_REF" >> $GITHUB_ENV
+          echo "KSU_URL=$KSU_URL" >> $GITHUB_ENV
+
+      - name: 获取 SUSFS 提交信息
+        if: inputs.ksu_mode == '关闭'
+        run: |
+          GITLAB_OWNER="simonpunk"
+          GITLAB_REPO="susfs4ksu"
+          declare -A BRANCH_MAP=(
+            ["gki_android12_5_10"]="gki-android12-5.10"
+            ["gki_android13_5_15"]="gki-android13-5.15"
+            ["gki_android14_6_1"]="gki-android14-6.1"
+            ["gki_android15_6_6"]="gki-android15-6.6"
+            ["gki_android16_6_12"]="gki-android16-6.12"
+          )
+          for var_name in "${!BRANCH_MAP[@]}"; do
+            branch_name="${BRANCH_MAP[$var_name]}"
+            COMMIT_HASH=$(git ls-remote https://gitlab.com/$GITLAB_OWNER/$GITLAB_REPO.git refs/heads/$branch_name | awk '{ print $1 }')
+            if [[ -n "$COMMIT_HASH" ]]; then
+              COMMIT_URL="https://gitlab.com/$GITLAB_OWNER/$GITLAB_REPO/-/commit/$COMMIT_HASH"
+              echo "COMMIT_HASH_${var_name}=$COMMIT_HASH" >> "$GITHUB_ENV"
+              echo "COMMIT_URL_${var_name}=$COMMIT_URL" >> "$GITHUB_ENV"
+            fi
+          done
+
+      - name: 生成发布说明
+        run: |
+          BUILD_DATE=$(date -u '+%Y-%m-%d %H:%M UTC')
+          if [[ "$KSU_REF" =~ ^[0-9a-f]{40}$ ]]; then
+            KSU_DISPLAY_REF="${KSU_REF:0:7}"
+          else
+            KSU_DISPLAY_REF="$KSU_REF"
+          fi
+          if [[ "${{ inputs.ksu_mode }}" == "禁用KSU" ]]; then
+            KSU_COMMIT_LINE="- 本次构建未集成 KernelSU"
+          else
+            KSU_COMMIT_LINE="- $KSU_NAME: [\`$KSU_DISPLAY_REF\`]($KSU_URL)"
+          fi
+
+          build_targets=""
+          append_target() {
+            local selected="$1" label="$2"
+            if [[ "$selected" == "true" ]]; then
+              if [[ -z "$build_targets" ]]; then
+                build_targets="$label"
+              else
+                build_targets="$build_targets, $label"
+              fi
+            fi
+          }
+          append_target "${{ inputs.build_a12_5_10 || inputs.build_all }}" "Android 12 / 5.10"
+          append_target "${{ inputs.build_a13_5_15 || inputs.build_all }}" "Android 13 / 5.15"
+          append_target "${{ inputs.build_a14_6_1 || inputs.build_all }}" "Android 14 / 6.1"
+          append_target "${{ inputs.build_a15_6_6 || inputs.build_all }}" "Android 15 / 6.6"
+          append_target "${{ inputs.build_a16_6_12 || inputs.build_all }}" "Android 16 / 6.12"
+          if [[ -z "$build_targets" ]]; then
+            build_targets="未选择"
+          fi
+
+          : > susfs_commits.md
+          append_susfs_commit() {
+            local selected="$1" label="$2" hash="$3" url="$4"
+            if [[ "$selected" == "true" && -n "$hash" && -n "$url" ]]; then
+              printf -- '- %s: [`%s`](%s)\n' "$label" "${hash:0:7}" "$url" >> susfs_commits.md
+            fi
+          }
+          append_susfs_commit "${{ inputs.build_a12_5_10 || inputs.build_all }}" "Android 12 / 5.10" "${COMMIT_HASH_gki_android12_5_10}" "${COMMIT_URL_gki_android12_5_10}"
+          append_susfs_commit "${{ inputs.build_a13_5_15 || inputs.build_all }}" "Android 13 / 5.15" "${COMMIT_HASH_gki_android13_5_15}" "${COMMIT_URL_gki_android13_5_15}"
+          append_susfs_commit "${{ inputs.build_a14_6_1 || inputs.build_all }}" "Android 14 / 6.1" "${COMMIT_HASH_gki_android14_6_1}" "${COMMIT_URL_gki_android14_6_1}"
+          append_susfs_commit "${{ inputs.build_a15_6_6 || inputs.build_all }}" "Android 15 / 6.6" "${COMMIT_HASH_gki_android15_6_6}" "${COMMIT_URL_gki_android15_6_6}"
+          append_susfs_commit "${{ inputs.build_a16_6_12 || inputs.build_all }}" "Android 16 / 6.12" "${COMMIT_HASH_gki_android16_6_12}" "${COMMIT_URL_gki_android16_6_12}"
+          if [[ "${{ inputs.ksu_mode }}" != "关闭" ]]; then
+            echo "- 本次构建未集成 SUSFS" > susfs_commits.md
+          elif [[ ! -s susfs_commits.md ]]; then
+            echo "- 未获取到本次构建对应的 SUSFS 提交信息" > susfs_commits.md
+          fi
+
+          cat > release_body.md << EOF
+          ## GKI Kernel Release
+
+          $RELEASE_HEADLINE
+
+          | 项目 | 内容 |
+          |:---|:---|
+          | 发布类型 | ${{ inputs.release_type }} |
+          | 发布时间 | $BUILD_DATE |
+          | 构建范围 | $build_targets |
+
+          ### 构建配置
+
+          | 项目 | 内容 |
+          |:---|:---|
+          | KernelSU / SUSFS 模式 | ${{ inputs.ksu_mode }} |
+          | KernelSU 变体 | $KSU_NAME |
+          | KernelSU 分支 | $BRANCH_INFO |
+          | SUSFS | $SUS_VER |
+          | Hook 类型 | $HOOK_TYPE |
+          | 挂载方式 | $MOUNT_TYPE |
+          | LTO | thin |
+          | BBG 安全补丁 | $BBG_STATUS |
+          | ZRAM / LZ4KD | $LZ4_STATUS |
+          | 网络增强 (BBRv3 / IPSet / CAKE / CIFS) | $NET_STATUS |
+          | KPM | $KPM_STATUS |
+
+          ### 下载说明
+
+          请在下方 **Assets** 中下载对应文件。
+
+          | 文件类型 | 用途 |
+          |:---|:---|
+          | \`*_kernel-*.zip\` | AnyKernel3 内核刷入包 |
+          | \`*.img\` | boot、vendor_boot 等镜像文件 |
+          | \`*.apk\` | KernelSU 管理器 |
+          | \`susfs-*.zip\` | SUSFS 配套模块 |
+          | \`SUSFS-Patches-*.zip\` | SUSFS 集成补丁（仅 SukiSU / BakaSU，供自行编译内核使用） |
+
+          > [!IMPORTANT]
+          > 刷入前请备份原厂 Boot 镜像。
+          > 如果设备无法启动，请先恢复原厂镜像，再提取 KernelSU 日志进行反馈。
+
+          <details>
+          <summary>刷入后处理</summary>
+
+          ### 正常启动
+
+          安装或更新 KernelSU 管理器后，检查 root、模块和 SUSFS 状态是否正常。
+
+          ### 无法启动
+
+          1. 恢复原厂 Boot 镜像
+          2. 使用 KernelSU 管理器或 recovery 提取日志
+          3. 提交到 [Issues](https://github.com/zzh20188/GKI_KernelSU_SUSFS/issues)，并附上设备型号、Android 版本、内核版本和刷入文件名
+
+          </details>
+
+          <details>
+          <summary>上游提交信息</summary>
+
+          **KernelSU**
+
+          $KSU_COMMIT_LINE
+
+          **SUSFS4KSU**
+
+          $(cat susfs_commits.md)
+
+          </details>
+
+          ---
+
+          推荐模块：https://github.com/sidex15/ksu_module_susfs
+
+          Unicode 零宽绕过修复请使用 Xposed 模块：https://t.me/real5ec1cff/268
+          EOF
+
+      - name: 生成版本标签
+        run: |
+          # 获取 SUSFS 版本，如果 get-manager 被跳过则使用默认值
+          SUS_VERSION="${{ needs.get-manager.outputs.susVer }}"
+          if [ -z "$SUS_VERSION" ]; then
+            echo "警告: 未获取到 SUSFS 版本，使用默认版本号"
+            SUS_VERSION="1.0.0"
+          fi
+
+          LATEST_TAG=$(gh api repos/$REPO_OWNER/$REPO_NAME/tags --jq '.[0].name' 2>/dev/null | sed 's/-.*//' || echo "")
+
+          if [ "$SUS_VERSION" = "$LATEST_TAG" ]; then
+            LATEST_TAG=$(gh api repos/$REPO_OWNER/$REPO_NAME/tags --jq '.[0].name')
+          else
+            LATEST_TAG="$SUS_VERSION-r0"
+          fi
+
+          NEW_TAG=$(echo "$LATEST_TAG" | awk -F'-r' '{suffix=$2; if (!suffix) suffix=0; suffix++; printf "%s-r%d", $1, suffix}')
+          echo "NEW_TAG=$NEW_TAG" >> $GITHUB_ENV
+          echo "生成标签: $NEW_TAG"
+
+      - name: 下载构建产物
+        uses: actions/download-artifact@v8
+        with:
+          path: ./downloaded-artifacts
+
+      - name: 创建 GitHub Release
+        run: |
+          PRERELEASE_FLAG=""
+          if [ "${{ inputs.release_type }}" == "Pre-Release" ]; then
+            PRERELEASE_FLAG="--prerelease"
+          fi
+
+          gh release create "$NEW_TAG" \
+            --title "$RELEASE_NAME" \
+            --notes-file release_body.md \
+            --target "$GITHUB_SHA" \
+            $PRERELEASE_FLAG
+
+      - name: 上传管理器和 SUSFS 模块
+        continue-on-error: true
+        run: |
+          echo "准备上传 APK 与 SUSFS 模块..."
+          apk_count=$(find ./downloaded-artifacts -type f -name "*.apk" | wc -l || true)
+          sus_count=$(find ./downloaded-artifacts -type f -path "./downloaded-artifacts/susfs-*/*" | wc -l || true)
+          echo "APK files: ${apk_count}"
+          echo "SUSFS files: ${sus_count}"
+          find ./downloaded-artifacts -type f -name "*.apk" -print0 | \
+          while IFS= read -r -d '' f; do
+            gh release upload "$NEW_TAG" "$f" || true
+          done
+          find ./downloaded-artifacts -type f -path "./downloaded-artifacts/susfs-*/*" -print0 | \
+          while IFS= read -r -d '' f; do
+            gh release upload "$NEW_TAG" "$f" || true
+          done
+
+      # 汇总 job 被跳过或没有产物时静默跳过
+      - name: 上传 SUSFS 集成补丁
+        if: needs.collect-susfs-patches.result == 'success'
+        continue-on-error: true
+        run: |
+          uploaded=0
+          for file in ./downloaded-artifacts/SUSFS-Patches-*/SUSFS-Patches-*.zip; do
+            [ -f "$file" ] || continue
+            echo "上传 $file..."
+            gh release upload "$NEW_TAG" "$file" && uploaded=$((uploaded + 1))
+          done
+          echo "已上传 $uploaded 个 SUSFS 集成补丁压缩包"
+
+      - name: 上传内核产物
+        run: |
+          for file in ./downloaded-artifacts/*_kernel-*/*; do
+            [ -d "$file" ] && continue
+            # 跳过 -Rejects 目录中的文件（已在 collect-rejects 中汇总处理）
+            [[ "$file" == *-Rejects/* ]] && continue
+            echo "上传 $file..."
+            gh release upload "$NEW_TAG" "$file"
+          done
+
+      - name: 构建摘要
+        run: |
+          echo "## 发布已创建" >> $GITHUB_STEP_SUMMARY
+          echo "- **标签**: $NEW_TAG" >> $GITHUB_STEP_SUMMARY
+          echo "- **类型**: ${{ inputs.release_type }}" >> $GITHUB_STEP_SUMMARY
+          echo "- **链接**: https://github.com/$REPO_OWNER/$REPO_NAME/releases/tag/$NEW_TAG" >> $GITHUB_STEP_SUMMARY
