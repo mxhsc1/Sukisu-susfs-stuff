@@ -59,6 +59,11 @@ jobs:
           sudo apt-get update
           sudo apt-get install -y git curl jq
 
+      - name: 检出 config
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: config
+
       - name: 获取 KSU & SUSFS 版本
         id: get_version
         run: |
@@ -89,6 +94,16 @@ jobs:
           fi
 
           cd KernelSU
+
+          # 与 build.yml 一致：config/config 中 custom=true 时固定 SukiSU 提交
+          if [ "${{ inputs.kernelsu_variant }}" == "SukiSU" ] && [ -f ../config/config ] \
+            && [ "$(grep '^custom=' ../config/config | head -1 | cut -d'=' -f2)" == "true" ]; then
+            PIN_COMMIT=$(grep '^sukisu=' ../config/config | head -1 | cut -d'=' -f2 | tr -d '[:space:]')
+            if [ -n "$PIN_COMMIT" ]; then
+              echo "SukiSU 固定提交: $PIN_COMMIT"
+              git checkout "$PIN_COMMIT"
+            fi
+          fi
 
           KSU_GIT_VERSION=$(git rev-list --count HEAD)
 
@@ -246,6 +261,11 @@ jobs:
               CANDIDATE_LIST=$(get_manager_artifacts "$ARTIFACTS")
               if [ -z "$CANDIDATE_LIST" ]; then
                 echo "跳过构建 $BUILD_ID ($HEAD_BRANCH): 未找到包含 '$KSUM' 的产物"
+                continue
+              fi
+
+              if [ "${{ inputs.kernelsu_variant }}" == "SukiSU" ] && ! printf '%s' "$CANDIDATE_LIST" | grep -qi 'spoof'; then
+                echo "跳过构建 $BUILD_ID ($HEAD_BRANCH): 没有 spoofed Manager 产物"
                 continue
               fi
 
@@ -412,3 +432,4 @@ jobs:
         with:
           name: susfs-${{ env.SUSFS_NAME }}
           path: ./susfs-module/*
+          
